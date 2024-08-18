@@ -20,9 +20,9 @@ resource "aws_eks_node_group" "node_group" {
   }
 
   // Lifecycle configuration to ignore changes in desired_size
-  lifecycle {
-    ignore_changes = [scaling_config[0].desired_size]
-  }
+  # lifecycle {
+  #   ignore_changes = [scaling_config[0].desired_size]
+  # }
 
   // Update configuration for the node group
   update_config {
