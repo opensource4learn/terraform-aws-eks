@@ -1,64 +1,102 @@
-provider "aws" {
-  region = "ap-south-1"
-}
+#######################################################
+# Terraform Configuration
+#######################################################
+
+# Specify the required providers and backend for Terraform state
 terraform {
-  required_version = ">= 0.12.0"
-}
-
-resource "aws_eks_cluster" "eks_cluster" {
-  name     = "${var.eks_cluster_prefix}-${var.eks_cluster_environment}"
-  role_arn = aws_iam_role.eks_cluster_role.arn
-  version  = var.kubernetes_version
-
-  vpc_config {
-    subnet_ids = var.subnet_ids
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
   }
-  kubernetes_network_config {
-    service_ipv4_cidr = var.eks_cluster_service_ipv4_cidr
-  }
-
-  timeouts {
-    create = var.eks_cluster_create_timeout
-    delete = var.eks_cluster_delete_timeout
-    update = var.eks_cluster_update_timeout
-  }
-
-  depends_on = [
-    aws_iam_role_policy_attachment.eks_cluster_policy,
-    aws_iam_role_policy_attachment.eks_vpc_resource_controller_policy,
-    aws_cloudwatch_log_group.eks_cluster_cloudwatch_log_group
-  ]
-
-  tags = {
-    Name        = "${var.eks_cluster_prefix}-${var.eks_cluster_environment}"
-    Environment = var.eks_cluster_environment
+  backend "s3" {
+    # Backend configuration for S3 will be added here
   }
 }
 
-# data "tls_certificate" "eks_cluster_tls_certificate" {
-#   url = aws_eks_cluster.eks_cluster.identity[0].oidc[0].issuer
-# }
+# AWS provider configuration
+provider "aws" {
+  region = var.region
+}
 
-# resource "aws_iam_openid_connect_provider" "eks_cluster_openid_connect_provider" {
-#   client_id_list  = ["sts.amazonaws.com"]
-#   thumbprint_list = [data.tls_certificate.eks_cluster_tls_certificate.certificates[0].sha1_fingerprint]
-#   url             = aws_eks_cluster.eks_cluster.identity[0].oidc[0].issuer
-# }
+#######################################################
+# VPC Module
+#######################################################
 
-# data "aws_iam_policy_document" "eks_cluster_assume_role_policy" {
-#   statement {
-#     actions = ["sts:AssumeRoleWithWebIdentity"]
-#     effect  = "Allow"
+# Create the VPC and subnets using a module
+module "vpc" {
+  source         = "./modules/vpc"
+  cluster_prefix = var.cluster_prefix
+  cidr           = var.cidr
+  subnet_bits    = var.subnet_bits
+}
 
-#     condition {
-#       test     = "StringEquals"
-#       variable = "${replace(aws_iam_openid_connect_provider.eks_cluster_openid_connect_provider.url, "https://", "")}:sub"
-#       values   = ["system:serviceaccount:kube-system:aws-node"]
-#     }
+#######################################################
+# EKS Cluster Module
+#######################################################
 
-#     principals {
-#       identifiers = [aws_iam_openid_connect_provider.eks_cluster_openid_connect_provider.arn]
-#       type        = "Federated"
-#     }
-#   }
-# }
+# Create the EKS cluster using a module
+module "eks" {
+  source                        = "./modules/eks"
+  cluster_prefix                = var.cluster_prefix
+  kubernetes_version            = var.kubernetes_version
+  private_subnet_ids            = module.vpc.private_subnet_ids
+  eks_cluster_enabled_log_types = var.eks_cluster_enabled_log_types
+}
+
+#######################################################
+# EKS Node Groups Module
+#######################################################
+
+# Create EKS node groups using a module
+module "nodes" {
+  depends_on       = [module.eks]
+  for_each         = var.nodes
+  source           = "./modules/eks/nodes"
+  cluster_prefix   = var.cluster_prefix
+  node_environment = each.key
+  subnet_ids       = module.vpc.private_subnet_ids
+  cluster_name     = module.eks.cluster_name
+  node_type        = each.value.node_type
+  instance_type    = try(each.value.instance_type, null)
+  desired_size     = try(each.value.desired_size, null)
+  max_size         = try(each.value.max_size, null)
+  min_size         = try(each.value.min_size, null)
+  selector         = each.value.node_type == "fargate" ? each.value.selector : null
+}
+
+#######################################################
+# RDS Database Module
+#######################################################
+
+# Create RDS instances using a module
+module "database" {
+  for_each          = var.databases
+  source            = "./modules/rds"
+  cluster_prefix    = var.cluster_prefix
+  db_environment    = each.key
+  db_engine         = each.value.db_engine
+  db_instance_class = each.value.db_instance_class
+  db_version        = each.value.db_version
+  db_storage        = each.value.db_storage
+  db_name           = each.value.db_name
+  db_username       = each.value.db_username
+  db_password       = each.value.db_password
+  vpc_id            = module.vpc.vpc_id
+  subnet_ids        = module.vpc.storage_subnet_ids
+}
+
+##########################################################################
+# ECR Module
+#########################################################################
+
+module "ecr" {
+  for_each = var.ecr
+  source   = "./modules/ecr"
+  
+  repository_name     = each.value.repositories  # Assuming 'repositories' is the correct attribute
+  cluster_prefix      = var.cluster_prefix
+  image_tag_mutability = "MUTABLE"  # Ensure this matches the desired mutability setting
+  scan_on_push        = false       # Adjust as per your requirements
+}
